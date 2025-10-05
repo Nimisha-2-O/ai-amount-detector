@@ -1,4 +1,4 @@
-# AI Amount Detector (MVP) - ai-amount-detector
+# AI Amount Detector
 
 ## Project
 Problem Statement 8 — AI-Powered Amount Detection in Medical Documents
