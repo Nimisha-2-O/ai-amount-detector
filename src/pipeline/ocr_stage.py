@@ -25,8 +25,34 @@ pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tessera
 # -------------------------------
 # Logging setup
 # -------------------------------
-logging.basicConfig(level=logging.INFO, format="[%(levelname)s] %(message)s")
+LOG_DIR = "logs"
+os.makedirs(LOG_DIR, exist_ok=True)
+LOG_FILE = os.path.join(LOG_DIR, "ocr_pipeline.log")
+
+# Configure logging to file + console
 logger = logging.getLogger("ocr_stage_gemini")
+logger.setLevel(logging.INFO)
+
+# File handler
+file_handler = logging.FileHandler(LOG_FILE, mode="a", encoding="utf-8")
+file_handler.setLevel(logging.INFO)
+
+# Console handler
+console_handler = logging.StreamHandler()
+console_handler.setLevel(logging.INFO)
+
+# Log format
+formatter = logging.Formatter("[%(asctime)s] [%(levelname)s] %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
+file_handler.setFormatter(formatter)
+console_handler.setFormatter(formatter)
+
+# Add handlers
+if not logger.handlers:
+    logger.addHandler(file_handler)
+    logger.addHandler(console_handler)
+
+logger.info(" Logging initialized. All OCR and Gemini outputs will be saved in logs/ocr_pipeline.log")
+
 
 # -------------------------------
 # Gemini Configuration
@@ -40,15 +66,40 @@ def configure_gemini(api_key: str, model: str = "gemini-2.5-pro"):
 # OCR Utility
 # -------------------------------
 def preprocess_for_ocr(img_bgr: np.ndarray) -> np.ndarray:
+    """
+    Balanced preprocessing that enhances text clarity
+    without destroying fine details. Works well for bills,
+    receipts, and forms with faint or colored text.
+    """
+
+    # 1️⃣ Convert to grayscale
     gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
-    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
+
+    # 2️⃣ Remove mild noise while preserving edges
+    gray = cv2.fastNlMeansDenoising(gray, h=15, templateWindowSize=7, searchWindowSize=21)
+
+    # 3️⃣ Gentle contrast stretching (normalize intensity range)
+    gray = cv2.normalize(gray, None, 0, 255, cv2.NORM_MINMAX)
+
+    # 4️⃣ Apply CLAHE for local contrast enhancement (limited clip)
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
     gray = clahe.apply(gray)
-    kernel = np.array([[0, -1, 0], [-1, 5, -1], [0, -1, 0]])
-    gray = cv2.filter2D(gray, -1, kernel)
-    _, th = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-    kernel_m = cv2.getStructuringElement(cv2.MORPH_RECT, (2,2))
-    th = cv2.morphologyEx(th, cv2.MORPH_CLOSE, kernel_m)
-    return th
+
+    # 5️⃣ Light gamma correction to brighten dark text
+    gamma = 1.2
+    inv_gamma = 1.0 / gamma
+    table = np.array([(i / 255.0) ** inv_gamma * 255 for i in np.arange(256)]).astype("uint8")
+    gray = cv2.LUT(gray, table)
+
+    # 6️⃣ (Optional) adaptive sharpening to highlight edges
+    blurred = cv2.GaussianBlur(gray, (0, 0), 3)
+    sharpened = cv2.addWeighted(gray, 1.5, blurred, -0.5, 0)
+
+    # 7️⃣ Slight morphological opening to remove background dots/noise
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (2, 2))
+    clean = cv2.morphologyEx(sharpened, cv2.MORPH_OPEN, kernel)
+
+    return clean
 
 
 def extract_text_from_image(image_input: Union[str, bytes, np.ndarray, Image.Image]) -> str:
@@ -68,7 +119,9 @@ def extract_text_from_image(image_input: Union[str, bytes, np.ndarray, Image.Ima
         raise TypeError("Unsupported image input type.")
 
     processed = preprocess_for_ocr(img)
-    text = pytesseract.image_to_string(processed)
+    custom_config = r'--oem 3 --psm 6'
+    text = pytesseract.image_to_string(processed, config=custom_config)
+
     return text.strip()
 
 
@@ -77,7 +130,7 @@ def extract_text_from_image(image_input: Union[str, bytes, np.ndarray, Image.Ima
 # -------------------------------
 def gemini_extract_amounts(model, text: str) -> Dict[str, Any]:
     """Send OCR text to Gemini and parse structured output."""
-    prompt = fprompt = f"""
+    prompt = f"""
 You are an expert financial document parser specialized in reading text extracted from scanned
 bills, receipts, and invoices (including hospital bills, restaurant receipts, and shopping invoices).
 
@@ -110,42 +163,49 @@ Guidelines:
 - If you find no valid amounts, return exactly:
   {{"status": "no_amounts_found", "reason": "document too noisy"}}
 
-Example 1:
-Input: Total: INR 1200 | Paid: 1000 | Due: 200 | Discount: 10%
-Output: {{"raw_tokens": ["1200","1000","200","10%"], "currency_hint": "INR", "confidence": 0.95}}
-
-Example 2:
-Input: T0tal : Rs l200 | Pald : 1000 | DUE : 200
-Output: {{"raw_tokens": ["1200","1000","200"], "currency_hint": "INR", "confidence": 0.85}}
-
-Example 3:
-Input: Subtotal $49.99 | Tax 5.00 | Total 54.99
-Output: {{"raw_tokens": ["49.99","5.00","54.99"], "currency_hint": "USD", "confidence": 0.94}}
-
 Now analyze and extract from this text:
 {text}
-"""
 
+VERY IMPORTANT:
+Respond with ONLY a valid JSON object — no markdown, no code fences, no explanations.
+The output must start with '{{' and end with '}}' and be fully parseable by json.loads().
+"""
 
     try:
         response = model.generate_content(prompt)
         raw_output = response.text.strip()
+        logger.info("🤖 Full Gemini raw output:\n" + raw_output)
 
-        # Remove code fences or markdown
+        # 🔧 Fix: Remove any Markdown code fences (```json, ``` etc.)
+        raw_output = re.sub(r"```[\s\S]*?```", lambda m: m.group(0).strip('`').strip(), raw_output)
         raw_output = re.sub(r"^```(json)?|```$", "", raw_output, flags=re.MULTILINE).strip()
 
-        # Try JSON parse
-        parsed = json.loads(raw_output)
+        # 🔧 Extract only JSON portion (handles markdown wrappers and extra text)
+        json_match = re.search(r"\{[\s\S]*\}", raw_output)
+        if json_match:
+            json_text = json_match.group(0).strip()
+        else:
+            json_text = raw_output.strip()
 
-        # Validate structure
+        # 🔧 Try to parse JSON safely
+        try:
+            parsed = json.loads(json_text)
+        except json.JSONDecodeError as e:
+            logger.error(f"JSON parsing error: {e}\nRaw output:\n{raw_output}")
+            return {"status": "no_amounts_found", "reason": "invalid_json_format"}
+
+        # ✅ Validate structure
         if isinstance(parsed, dict) and "raw_tokens" in parsed:
             return parsed
+        elif isinstance(parsed, dict) and "status" in parsed:
+            return parsed
         else:
+            logger.warning(f"Unexpected JSON keys: {list(parsed.keys())}")
             return {"status": "no_amounts_found", "reason": "invalid_json_structure"}
+
     except Exception as e:
         logger.warning(f"Gemini extraction failed: {e}")
         return {"status": "no_amounts_found", "reason": "gemini_api_error"}
-
 
 # -------------------------------
 # Main Class
@@ -177,7 +237,7 @@ class OCRStage:
                 logger.error(f"OCR extraction failed: {e}")
                 return {"status": "no_amounts_found", "reason": "ocr_failed"}
 
-            logger.info(f"OCR extracted text: {ocr_text[:120]}...")
+            logger.info("Full OCR extracted text:\n" + ocr_text)
             return gemini_extract_amounts(self.model, ocr_text)
 
         # Direct text input
