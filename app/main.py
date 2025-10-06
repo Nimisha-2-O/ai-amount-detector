@@ -154,15 +154,20 @@ async def extract_and_classify(
         else:
             raise HTTPException(status_code=400, detail="Provide either text or image input.")
 
+        print(f"🔍 OCR Result: {ocr_res}")
+
         # 2️⃣ Normalization
         norm_res = normalization_stage.run(ocr_res)
+        print(f"🔍 Normalization Result: {norm_res}")
 
         # 3️⃣ Classification
         class_res = classification_stage.run(text_content, norm_res)
+        print(f"🔍 Classification Result: {class_res}")
 
         return JSONResponse(content=class_res, status_code=200)
 
     except Exception as e:
+        print(f"❌ Error in extract_and_classify: {e}")
         return JSONResponse(content={"status": "error", "message": str(e)}, status_code=500)
 
 
