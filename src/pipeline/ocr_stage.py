@@ -3,7 +3,7 @@ Step 1 — AI-driven OCR/Text Extraction using Google Gemini
 
 - Accepts raw text or image input.
 - Uses Tesseract OCR for visual text extraction (AI model).
-- Uses Gemini 1.5 (Flash/Pro) for intelligent extraction.
+- Uses Gemini 2.5 Pro for intelligent extraction.
 - Returns clean structured JSON.
 
 Dependencies:
@@ -20,6 +20,7 @@ import pytesseract
 import numpy as np
 import cv2
 import logging
+pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
 
 # -------------------------------
 # Logging setup
@@ -30,7 +31,7 @@ logger = logging.getLogger("ocr_stage_gemini")
 # -------------------------------
 # Gemini Configuration
 # -------------------------------
-def configure_gemini(api_key: str, model: str = "gemini-2.0-flash"):
+def configure_gemini(api_key: str, model: str = "gemini-2.5-pro"):
     genai.configure(api_key=api_key)
     return genai.GenerativeModel(model)
 
@@ -38,11 +39,15 @@ def configure_gemini(api_key: str, model: str = "gemini-2.0-flash"):
 # -------------------------------
 # OCR Utility
 # -------------------------------
-def preprocess_image(img_bgr: np.ndarray) -> np.ndarray:
-    """Grayscale + denoise + threshold for better OCR."""
+def preprocess_for_ocr(img_bgr: np.ndarray) -> np.ndarray:
     gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
-    gray = cv2.bilateralFilter(gray, 9, 75, 75)
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
+    gray = clahe.apply(gray)
+    kernel = np.array([[0, -1, 0], [-1, 5, -1], [0, -1, 0]])
+    gray = cv2.filter2D(gray, -1, kernel)
     _, th = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    kernel_m = cv2.getStructuringElement(cv2.MORPH_RECT, (2,2))
+    th = cv2.morphologyEx(th, cv2.MORPH_CLOSE, kernel_m)
     return th
 
 
@@ -62,7 +67,7 @@ def extract_text_from_image(image_input: Union[str, bytes, np.ndarray, Image.Ima
     else:
         raise TypeError("Unsupported image input type.")
 
-    processed = preprocess_image(img)
+    processed = preprocess_for_ocr(img)
     text = pytesseract.image_to_string(processed)
     return text.strip()
 
@@ -72,35 +77,55 @@ def extract_text_from_image(image_input: Union[str, bytes, np.ndarray, Image.Ima
 # -------------------------------
 def gemini_extract_amounts(model, text: str) -> Dict[str, Any]:
     """Send OCR text to Gemini and parse structured output."""
-    prompt = f"""
-You are an intelligent financial text extractor.
+    prompt = fprompt = f"""
+You are an expert financial document parser specialized in reading text extracted from scanned
+bills, receipts, and invoices (including hospital bills, restaurant receipts, and shopping invoices).
 
-Given text from a bill or receipt (may contain OCR errors),
-extract all numeric or percentage values that look like
-amounts, totals, discounts, or payments.
+The text below may contain OCR errors such as:
+- 'O' or 'o' instead of '0'
+- 'I', 'l', or '|' instead of '1'
+- 'S' instead of '5'
+- Missing spaces, or broken numeric tokens (e.g., "3 70.40" instead of "370.40")
 
-Return only a valid JSON object with the exact structure:
+Your goal:
+1. Identify all numeric or percentage values that represent financial amounts, totals, discounts,
+   taxes, balances, or payments.
+2. Correct likely OCR errors in numeric tokens.
+3. Merge broken tokens into proper numeric values.
+4. Detect the most likely currency hint (e.g., "INR", "USD", "EUR", etc.) from symbols or words in text.
+5. Return only clean structured JSON, with no extra text or explanation.
+
+Output must be a **strict JSON object** with the following schema:
 
 {{
-  "raw_tokens": [list of numeric or percentage strings],
-  "currency_hint": (e.g., "INR", "USD", or null),
-  "confidence": (a float between 0 and 1)
+  "raw_tokens": [list of cleaned numeric or percentage strings],
+  "currency_hint": "INR" | "USD" | "EUR" | null,
+  "confidence": float (0.0 - 1.0)
 }}
 
-If you find no valid amounts, return:
-{{"status":"no_amounts_found","reason":"document too noisy"}}
+Guidelines:
+- Keep the tokens in the same order they appear in the text.
+- If you find duplicate numbers (like subtotal and total both same), still include both.
+- Confidence should reflect how certain you are about the correctness of extraction.
+- If you find no valid amounts, return exactly:
+  {{"status": "no_amounts_found", "reason": "document too noisy"}}
 
 Example 1:
-Input: "Total: INR 1200 | Paid: 1000 | Due: 200 | Discount: 10%"
-Output: {{"raw_tokens": ["1200","1000","200","10%"], "currency_hint": "INR", "confidence": 0.94}}
+Input: Total: INR 1200 | Paid: 1000 | Due: 200 | Discount: 10%
+Output: {{"raw_tokens": ["1200","1000","200","10%"], "currency_hint": "INR", "confidence": 0.95}}
 
 Example 2:
-Input: "T0tal: Rs l200 | Pald: 1000 | Due: 200"
-Output: {{"raw_tokens":["1200","1000","200"], "currency_hint":"INR", "confidence":0.81}}
+Input: T0tal : Rs l200 | Pald : 1000 | DUE : 200
+Output: {{"raw_tokens": ["1200","1000","200"], "currency_hint": "INR", "confidence": 0.85}}
 
-Now process this TEXT below:
+Example 3:
+Input: Subtotal $49.99 | Tax 5.00 | Total 54.99
+Output: {{"raw_tokens": ["49.99","5.00","54.99"], "currency_hint": "USD", "confidence": 0.94}}
+
+Now analyze and extract from this text:
 {text}
 """
+
 
     try:
         response = model.generate_content(prompt)
@@ -126,7 +151,7 @@ Now process this TEXT below:
 # Main Class
 # -------------------------------
 class OCRStage:
-    def __init__(self, gemini_api_key: str, model_name: str = "gemini-2.0-flash"):
+    def __init__(self, gemini_api_key: str, model_name: str = "gemini-2.5-pro"):
         self.model = configure_gemini(gemini_api_key, model_name)
 
     def run(self, input_data: Union[str, bytes, np.ndarray, Image.Image], input_mode: str = "auto") -> Dict[str, Any]:

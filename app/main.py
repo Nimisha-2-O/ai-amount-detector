@@ -13,7 +13,7 @@ load_dotenv()
 # -----------------------------
 app = FastAPI(
     title="AI Amount Detector (Gemini-powered OCR Stage)",
-    description="Extracts numeric tokens and currency hints from text or image using Gemini 1.5",
+    description="Extracts numeric tokens and currency hints from text or image using Gemini 2.5 pro",
     version="1.0.0"
 )
 
@@ -29,7 +29,7 @@ if not GEMINI_API_KEY:
     raise ValueError("❌ Missing Gemini API key. Set GEMINI_API_KEY environment variable.")
 
 # Initialize OCRStage (Gemini model)
-ocr_stage = OCRStage(gemini_api_key= GEMINI_API_KEY, model_name="gemini-2.0-flash")
+ocr_stage = OCRStage(gemini_api_key= GEMINI_API_KEY, model_name="gemini-2.5-pro")
 
 
 # -----------------------------
