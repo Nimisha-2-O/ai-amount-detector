@@ -1,139 +1,169 @@
 """
-OCR stage implementation (MVP)
+Step 1 — AI-driven OCR/Text Extraction using Google Gemini
 
-Functions:
-- extract_raw_tokens_from_bytes(image_bytes: bytes) -> dict
+- Accepts raw text or image input.
+- Uses Tesseract OCR for visual text extraction (AI model).
+- Uses Gemini 1.5 (Flash/Pro) for intelligent extraction.
+- Returns clean structured JSON.
 
-Returns a dict:
-{
-  "raw_tokens": [
-    {
-      "text": "₹ 1,234.00",
-      "conf": 87.0,
-      "left": 10,
-      "top": 20,
-      "width": 120,
-      "height": 18
-    },
-    ...
-  ],
-  "currency_hint": "INR",        # simple hint if ₹ / Rs / INR seen
-  "overall_confidence": 85.2    # average confidence across tokens
-}
+Dependencies:
+    pip install google-generativeai pytesseract opencv-python pillow numpy
 """
 
-from typing import Dict, List, Any
-import cv2
-import numpy as np
-import pytesseract
+import os
+import json
 import re
+from typing import Union, Dict, Any
+import google.generativeai as genai
+from PIL import Image
+import pytesseract
+import numpy as np
+import cv2
+import logging
 
-# If Tesseract is installed in default Windows location, set it explicitly.
-# Update this path if your installation differs.
-pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
+# -------------------------------
+# Logging setup
+# -------------------------------
+logging.basicConfig(level=logging.INFO, format="[%(levelname)s] %(message)s")
+logger = logging.getLogger("ocr_stage_gemini")
 
-# Tesseract config for better numeric recognition (we keep default language)
-_TESSERACT_CONFIG = r'--oem 3 --psm 6'
+# -------------------------------
+# Gemini Configuration
+# -------------------------------
+def configure_gemini(api_key: str, model: str = "gemini-2.0-flash"):
+    genai.configure(api_key=api_key)
+    return genai.GenerativeModel(model)
 
-def _preprocess_image_bytes(image_bytes: bytes) -> np.ndarray:
-    """
-    Convert bytes -> cv2 image and apply preprocessing:
-    - convert to grayscale
-    - bilateral filter (denoise while keeping edges)
-    - adaptive threshold
-    - optional resize if very small
-    """
-    arr = np.frombuffer(image_bytes, np.uint8)
-    img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
-    if img is None:
-        raise ValueError("Could not decode image bytes")
 
-    # Convert to grayscale
-    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-
-    # Resize if image is very small to help OCR
-    h, w = gray.shape
-    if max(h, w) < 800:
-        scale = 800 / max(h, w)
-        new_w = int(w * scale)
-        new_h = int(h * scale)
-        gray = cv2.resize(gray, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
-
-    # Denoise while preserving edges
-    denoised = cv2.bilateralFilter(gray, d=9, sigmaColor=75, sigmaSpace=75)
-
-    # Adaptive threshold (good for uneven lighting)
-    th = cv2.adaptiveThreshold(
-        denoised,
-        255,
-        cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-        cv2.THRESH_BINARY,
-        blockSize=15,
-        C=9,
-    )
-
+# -------------------------------
+# OCR Utility
+# -------------------------------
+def preprocess_image(img_bgr: np.ndarray) -> np.ndarray:
+    """Grayscale + denoise + threshold for better OCR."""
+    gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
+    gray = cv2.bilateralFilter(gray, 9, 75, 75)
+    _, th = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
     return th
 
-def _detect_currency_hint(text: str) -> str:
-    """
-    Very simple currency detection heuristic. Returns 'INR' if Indian rupee symbols
-    (₹, Rs, INR) are present, else 'UNKNOWN'.
-    """
-    if not text:
-        return "UNKNOWN"
-    if "₹" in text or re.search(r'\bRs\b', text, flags=re.IGNORECASE) or re.search(r'\bINR\b', text, flags=re.IGNORECASE):
-        return "INR"
-    return "UNKNOWN"
 
-def extract_raw_tokens_from_bytes(image_bytes: bytes) -> Dict[str, Any]:
-    """
-    Main OCR function for Step 2.
-    """
-    # Preprocess
-    preproc = _preprocess_image_bytes(image_bytes)
+def extract_text_from_image(image_input: Union[str, bytes, np.ndarray, Image.Image]) -> str:
+    """Run Tesseract OCR on an image input (path, bytes, array, or PIL)."""
+    if isinstance(image_input, str):
+        if not os.path.exists(image_input):
+            raise FileNotFoundError(f"Image not found: {image_input}")
+        img = cv2.imread(image_input)
+    elif isinstance(image_input, (bytes, bytearray)):
+        img_array = np.frombuffer(image_input, np.uint8)
+        img = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
+    elif isinstance(image_input, np.ndarray):
+        img = image_input
+    elif isinstance(image_input, Image.Image):
+        img = cv2.cvtColor(np.array(image_input), cv2.COLOR_RGB2BGR)
+    else:
+        raise TypeError("Unsupported image input type.")
 
-    # Use pytesseract to get detailed data
-    # We use image_to_data which returns word-level info including confidences and bounding boxes.
-    data = pytesseract.image_to_data(preproc, config=_TESSERACT_CONFIG, output_type=pytesseract.Output.DICT)
+    processed = preprocess_image(img)
+    text = pytesseract.image_to_string(processed)
+    return text.strip()
 
-    raw_tokens: List[Dict[str, Any]] = []
-    n_boxes = len(data.get("level", []))
-    confidences = []
-    full_text_accum = []
 
-    for i in range(n_boxes):
-        text = data.get("text", [])[i].strip() if data.get("text") else ""
-        conf_raw = data.get("conf", [])[i] if data.get("conf") else "-1"
-        # pytesseract sometimes returns '-1' for non-text boxes; handle that.
-        try:
-            conf = float(conf_raw)
-        except Exception:
-            conf = -1.0
+# -------------------------------
+# Gemini Reasoning Extraction
+# -------------------------------
+def gemini_extract_amounts(model, text: str) -> Dict[str, Any]:
+    """Send OCR text to Gemini and parse structured output."""
+    prompt = f"""
+You are an intelligent financial text extractor.
 
-        if text == "" or conf < 0:
-            continue
+Given text from a bill or receipt (may contain OCR errors),
+extract all numeric or percentage values that look like
+amounts, totals, discounts, or payments.
 
-        left = int(data.get("left", [])[i])
-        top = int(data.get("top", [])[i])
-        width = int(data.get("width", [])[i])
-        height = int(data.get("height", [])[i])
+Return only a valid JSON object with the exact structure:
 
-        raw_tokens.append({
-            "text": text,
-            "conf": conf,
-            "left": left,
-            "top": top,
-            "width": width,
-            "height": height
-        })
-        confidences.append(conf)
-        full_text_accum.append(text)
+{{
+  "raw_tokens": [list of numeric or percentage strings],
+  "currency_hint": (e.g., "INR", "USD", or null),
+  "confidence": (a float between 0 and 1)
+}}
 
-    overall_confidence = float(sum(confidences) / len(confidences)) if confidences else 0.0
-    currency_hint = _detect_currency_hint(" ".join(full_text_accum))
+If you find no valid amounts, return:
+{{"status":"no_amounts_found","reason":"document too noisy"}}
 
-    return {
-        "raw_tokens": raw_tokens,
-        "currency_hint": currency_hint,
-        "overall_confidence": round(overall_confidence, 2)
-    }
+Example 1:
+Input: "Total: INR 1200 | Paid: 1000 | Due: 200 | Discount: 10%"
+Output: {{"raw_tokens": ["1200","1000","200","10%"], "currency_hint": "INR", "confidence": 0.94}}
+
+Example 2:
+Input: "T0tal: Rs l200 | Pald: 1000 | Due: 200"
+Output: {{"raw_tokens":["1200","1000","200"], "currency_hint":"INR", "confidence":0.81}}
+
+Now process this TEXT below:
+{text}
+"""
+
+    try:
+        response = model.generate_content(prompt)
+        raw_output = response.text.strip()
+
+        # Remove code fences or markdown
+        raw_output = re.sub(r"^```(json)?|```$", "", raw_output, flags=re.MULTILINE).strip()
+
+        # Try JSON parse
+        parsed = json.loads(raw_output)
+
+        # Validate structure
+        if isinstance(parsed, dict) and "raw_tokens" in parsed:
+            return parsed
+        else:
+            return {"status": "no_amounts_found", "reason": "invalid_json_structure"}
+    except Exception as e:
+        logger.warning(f"Gemini extraction failed: {e}")
+        return {"status": "no_amounts_found", "reason": "gemini_api_error"}
+
+
+# -------------------------------
+# Main Class
+# -------------------------------
+class OCRStage:
+    def __init__(self, gemini_api_key: str, model_name: str = "gemini-2.0-flash"):
+        self.model = configure_gemini(gemini_api_key, model_name)
+
+    def run(self, input_data: Union[str, bytes, np.ndarray, Image.Image], input_mode: str = "auto") -> Dict[str, Any]:
+        """
+        input_mode: "text", "image", or "auto" (detect automatically)
+        """
+        # Detect mode automatically
+        if input_mode == "auto":
+            if isinstance(input_data, str) and os.path.exists(input_data):
+                input_mode = "image"
+            elif isinstance(input_data, str):
+                input_mode = "text"
+            elif isinstance(input_data, (bytes, bytearray, np.ndarray, Image.Image)):
+                input_mode = "image"
+            else:
+                raise ValueError("Cannot auto-detect input mode. Use 'text' or 'image' explicitly.")
+
+        # Extract text if image
+        if input_mode == "image":
+            try:
+                ocr_text = extract_text_from_image(input_data)
+            except Exception as e:
+                logger.error(f"OCR extraction failed: {e}")
+                return {"status": "no_amounts_found", "reason": "ocr_failed"}
+
+            logger.info(f"OCR extracted text: {ocr_text[:120]}...")
+            return gemini_extract_amounts(self.model, ocr_text)
+
+        # Direct text input
+        elif input_mode == "text":
+            text = str(input_data).strip()
+            if not text:
+                return {"status": "no_amounts_found", "reason": "empty_text"}
+            return gemini_extract_amounts(self.model, text)
+
+        else:
+            raise ValueError("Invalid input_mode. Choose from 'text', 'image', or 'auto'.")
+
+
+
