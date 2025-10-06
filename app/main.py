@@ -5,6 +5,7 @@ from fastapi import FastAPI, File, UploadFile, Form, HTTPException
 from fastapi.responses import JSONResponse
 from src.pipeline.ocr_stage import OCRStage
 from src.pipeline.normalization import NormalizationStage
+from src.pipeline.classification import ClassificationStage
 from typing import Optional
 from PIL import Image
 from dotenv import load_dotenv
@@ -131,6 +132,38 @@ async def extract_and_normalize(
     except Exception as e:
         return JSONResponse(content={"status": "error", "message": str(e)}, status_code=500)
 
+
+
+classification_stage = ClassificationStage(gemini_model=ocr_stage.model)
+
+@app.post("/extract/classify")
+async def extract_and_classify(
+    text: Optional[str] = Form(None),
+    image: Optional[UploadFile] = File(None)
+):
+    try:
+        # 1️⃣ OCR stage
+        if text:
+            ocr_res = ocr_stage.run(text, input_mode="text")
+            text_content = text
+        elif image:
+            content = await image.read()
+            img = Image.open(io.BytesIO(content))
+            ocr_res = ocr_stage.run(img, input_mode="image")
+            text_content = ocr_res.get("raw_text", "")
+        else:
+            raise HTTPException(status_code=400, detail="Provide either text or image input.")
+
+        # 2️⃣ Normalization
+        norm_res = normalization_stage.run(ocr_res)
+
+        # 3️⃣ Classification
+        class_res = classification_stage.run(text_content, norm_res)
+
+        return JSONResponse(content=class_res, status_code=200)
+
+    except Exception as e:
+        return JSONResponse(content={"status": "error", "message": str(e)}, status_code=500)
 
 
 # @app.post("/extract/ocr", response_model=OCRStage.OCRResponse)
