@@ -4,6 +4,7 @@ import uvicorn
 from fastapi import FastAPI, File, UploadFile, Form, HTTPException
 from fastapi.responses import JSONResponse
 from src.pipeline.ocr_stage import OCRStage
+from src.pipeline.normalization import NormalizationStage
 from typing import Optional
 from PIL import Image
 from dotenv import load_dotenv
@@ -31,6 +32,12 @@ if not GEMINI_API_KEY:
 # Initialize OCRStage (Gemini model)
 ocr_stage = OCRStage(gemini_api_key= GEMINI_API_KEY, model_name="gemini-2.5-pro")
 
+from src.pipeline.normalization import NormalizationStage
+USE_GEMINI_FOR_NORMALIZATION = os.getenv("NORMALIZATION_USE_GEMINI", "false").lower() == "true"
+normalization_stage = NormalizationStage(
+    use_gemini=USE_GEMINI_FOR_NORMALIZATION,
+    gemini_model=ocr_stage.model if USE_GEMINI_FOR_NORMALIZATION else None
+)
 
 # -----------------------------
 # API Endpoint: /extract
@@ -68,6 +75,64 @@ async def extract_amounts(
             content={"status": "error", "message": str(e)},
             status_code=500
         )
+
+USE_GEMINI_FOR_NORMALIZATION = os.getenv("NORMALIZATION_USE_GEMINI", "false").lower() == "true"
+normalization_stage = NormalizationStage(
+    use_gemini=USE_GEMINI_FOR_NORMALIZATION,
+    gemini_model=ocr_stage.model if USE_GEMINI_FOR_NORMALIZATION else None
+)
+
+@app.post("/extract/normalize")
+async def extract_and_normalize(
+    text: Optional[str] = Form(None),
+    image: Optional[UploadFile] = File(None),
+    verbose: bool = False,   # set ?verbose=true to get full details (ocr + normalization.details)
+):
+    """
+    Run OCR (step1) -> Normalization (step2).
+    By default returns only:
+      {
+        "normalized_amounts": [...],
+        "normalization_confidence": 0.95
+      }
+    Set verbose=true to return the full structure (for debugging/demo).
+    """
+    try:
+        # 1) Run OCR stage (reuse existing logic)
+        if text:
+            ocr_res = ocr_stage.run(text, input_mode="text")
+        elif image:
+            content = await image.read()
+            img = Image.open(io.BytesIO(content))
+            ocr_res = ocr_stage.run(img, input_mode="image")
+        else:
+            raise HTTPException(status_code=400, detail="Provide either 'text' or 'image' input.")
+
+        # 2) If OCR indicates no amounts, pass that back
+        status = ocr_res.get("status") if isinstance(ocr_res, dict) else None
+        if status and str(status).startswith("no_amounts_found"):
+            # Keep existing guardrail output so callers can handle it
+            return JSONResponse(content=ocr_res, status_code=200)
+
+        # 3) Run normalization
+        norm_res = normalization_stage.run(ocr_res)
+
+        # 4) If verbose requested, return full object (ocr + normalization)
+        if verbose:
+            return JSONResponse(content={"ocr": ocr_res, "normalization": norm_res}, status_code=200)
+
+        # 5) Default: compact / minimal response required by your endpoint
+        compact = {
+            "normalized_amounts": norm_res.get("normalized_amounts", []),
+            "normalization_confidence": norm_res.get("normalization_confidence", 0.0)
+        }
+        return JSONResponse(content=compact, status_code=200)
+
+    except Exception as e:
+        return JSONResponse(content={"status": "error", "message": str(e)}, status_code=500)
+
+
+
 # @app.post("/extract/ocr", response_model=OCRStage.OCRResponse)
 # async def extract_ocr(file: UploadFile = File(...)):
 #     """
