@@ -1,11 +1,16 @@
+import logging
 import io
 import os
 import uvicorn
 from fastapi import FastAPI, File, UploadFile, Form, HTTPException
 from fastapi.responses import JSONResponse
+
+# Initialize logger
+logger = logging.getLogger(__name__)
 from src.pipeline.ocr_stage import OCRStage
 from src.pipeline.normalization import NormalizationStage
 from src.pipeline.classification import ClassificationStage
+from src.pipeline.final_output import FinalOutputStage
 from typing import Optional
 from PIL import Image
 from dotenv import load_dotenv
@@ -170,6 +175,40 @@ async def extract_and_classify(
         print(f"❌ Error in extract_and_classify: {e}")
         return JSONResponse(content={"status": "error", "message": str(e)}, status_code=500)
 
+
+final_output_stage = FinalOutputStage()
+
+@app.post("/extract/final")
+async def extract_full_pipeline(
+    text: Optional[str] = Form(None),
+    image: Optional[UploadFile] = File(None)
+):
+    try:
+        # 1️⃣ OCR
+        if text:
+            ocr_res = ocr_stage.run(text, input_mode="text")
+            text_content = text
+        elif image:
+            content = await image.read()
+            img = Image.open(io.BytesIO(content))
+            ocr_res = ocr_stage.run(img, input_mode="image")
+            text_content = ocr_res.get("raw_text", "")
+        else:
+            raise HTTPException(status_code=400, detail="Provide either 'text' or 'image' input.")
+
+        # 2️⃣ Normalization
+        norm_res = normalization_stage.run(ocr_res)
+
+        # 3️⃣ Classification
+        class_res = classification_stage.run(text_content, norm_res)
+
+        # 4️⃣ Final output assembly
+        final_json = final_output_stage.run(ocr_res, norm_res, class_res, text_content)
+        return JSONResponse(content=final_json, status_code=200)
+
+    except Exception as e:
+        logger.error(f"❌ Final pipeline error: {e}")
+        return JSONResponse(content={"status": "error", "message": str(e)}, status_code=500)
 
 # @app.post("/extract/ocr", response_model=OCRStage.OCRResponse)
 # async def extract_ocr(file: UploadFile = File(...)):
