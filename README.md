@@ -80,7 +80,7 @@ curl -X POST http://127.0.0.1:8000/extract \
   -F "text=Total INR 1,250.00 Paid 1000 Due 250"
 ```
 
-Image example:
+Image example:![Test sample image](assets/image.jpg)
 
 ```
 curl -X POST http://127.0.0.1:8000/extract \
@@ -124,7 +124,7 @@ You can test the same endpoints in Postman either by importing the API schema or
     - POST `/extract/final`
     - One of:
       - Key `text` as Text value (e.g., `Total INR 1,250.00 Paid 1000 Due 250`)
-      - Key `image` as File (choose any image file) eg. in assets folder
+      - Key `image` as File (choose any image of medical bill) eg. in assets folder
     - POST `/extract`
     - One of:
       - Key `text` as Text value (e.g., `Total INR 1,250.00 Paid 1000 Due 250`)
@@ -178,14 +178,14 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
 The output must start with '{{' and end with '}}' and be fully parseable by json.loads().
 
 
-#High-level intent for each stage’s prompt:
+# High-level intent for each stage’s prompt:
 
 - OCR extraction (Gemini): find financial amounts, correct OCR errors, infer currency, output strict JSON. Handles code-fence cleanup and JSON extraction.
 - Normalization fallback (Gemini): batch-correct ambiguous tokens and return strict JSON mapping with explanations.
 - Classification (Gemini): label each normalized amount as `total_bill`, `paid`, `due`, etc., with an overall confidence, strictly JSON.
 - Final provenance (Gemini): given full text and a number, return the shortest clause evidencing that number; avoid percentages and unrelated separators.
 
-##Key refinements embedded in prompts/code:
+# Key refinements embedded in prompts/code:
 
 - Force strict JSON responses; strip/clean code fences if Gemini returns markdown.
 - Reject percentage tokens during numeric parsing.
@@ -203,7 +203,14 @@ The output must start with '{{' and end with '}}' and be fully parseable by json
 ## Backend Architecture Diagram
 
 text/image → OCR (Tesseract) → Gemini extract → normalized numbers → Gemini classify → final assembly (provenance) → JSON output
+![Architecture](assets/architecture.jpg)
 
 ## Screenshots / Recordings
+![Main-Screen](assets/mainscreen.png)
+![Output screen for image input](assets/imageInput.png)
+![Output screen for text input](assets/textInput.png)
+![Architecture](assets/architecture2.png)
+![Test sample image](assets/image.jpg)
+![Architecture](assets/architecture2.png)
 
-in assets folder
+
