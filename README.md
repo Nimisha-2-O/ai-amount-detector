@@ -1,6 +1,7 @@
 # AI Amount Detector
 
 AI-Powered Amount Detection for medical documents (bills/receipts). The system extracts numeric tokens via OCR, normalizes/corrects them, classifies each value by context (total/paid/due/etc.), and assembles a final, provenance-backed JSON output. Built with FastAPI and Google Gemini.
+GitHub: https://github.com/Nimisha-2-O/ai-amount-detector.git
 
 ## Tech Stack
 
@@ -205,12 +206,16 @@ The output must start with '{{' and end with '}}' and be fully parseable by json
 text/image → OCR (Tesseract) → Gemini extract → normalized numbers → Gemini classify → final assembly (provenance) → JSON output
 ![Architecture](assets/architecture.jpg)
 
-## Screenshots / Recordings
+## Screenshots 
+# Main-Screen
 ![Main-Screen](assets/mainscreen.png)
+# Output screen for image input
 ![Output screen for image input](assets/imageInput.png)
+# Output screen for text input
 ![Output screen for text input](assets/textInput.png)
+# Architecture
 ![Architecture](assets/architecture2.png)
+# Test sample image
 ![Test sample image](assets/image.jpg)
-![Architecture](assets/architecture2.png)
 
 
