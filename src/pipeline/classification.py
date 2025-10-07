@@ -21,14 +21,14 @@ def extract_json_from_gemini(raw_text: str) -> str:
     if not raw_text:
         return ""
 
-    # 1️⃣ Remove any markdown code fences, anywhere in the text
+    # 1️ Remove any markdown code fences, anywhere in the text
     raw_text = re.sub(r"```(?:json)?", "", raw_text, flags=re.IGNORECASE)
     raw_text = raw_text.replace("```", "")
 
-    # 2️⃣ Strip leading/trailing whitespace/newlines
+    # 2️ Strip leading/trailing whitespace/newlines
     raw_text = raw_text.strip()
 
-    # 3️⃣ Find the first '{' and last '}' to isolate JSON block
+    # 3️ Find the first '{' and last '}' to isolate JSON block
     start = raw_text.find("{")
     end = raw_text.rfind("}")
     if start != -1 and end != -1 and end > start:
@@ -37,23 +37,23 @@ def extract_json_from_gemini(raw_text: str) -> str:
         if json_content.startswith("{") and json_content.endswith("}"):
             return json_content
 
-    # 4️⃣ Try to find JSON in code blocks
+    # 4️ Try to find JSON in code blocks
     json_pattern = r'```(?:json)?\s*(\{.*?\})\s*```'
     match = re.search(json_pattern, raw_text, re.DOTALL | re.IGNORECASE)
     if match:
         return match.group(1).strip()
 
-    # 5️⃣ Try to find JSON anywhere in the text (more flexible)
+    # 5️ Try to find JSON anywhere in the text (more flexible)
     json_pattern_flexible = r'\{[^{}]*"amounts"[^{}]*\}'
     match = re.search(json_pattern_flexible, raw_text, re.DOTALL)
     if match:
         return match.group(0).strip()
 
-    # 6️⃣ Fallback — return cleaned text if it looks like JSON
+    # 6️ Fallback — return cleaned text if it looks like JSON
     if raw_text.startswith("{") and raw_text.endswith("}"):
         return raw_text
 
-    # 7️⃣ Last resort — return empty string
+    # 7️ Last resort — return empty string
     return ""
 
     

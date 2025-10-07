@@ -25,6 +25,17 @@ app = FastAPI(
 )
 
 # -----------------------------
+# Health / Readiness Endpoint
+# -----------------------------
+@app.get("/health")
+async def health_check():
+    return JSONResponse(content={
+        "status": "ok",
+        "service": "ai-amount-detector",
+        "version": "1.0.0"
+    }, status_code=200)
+
+# -----------------------------
 # Environment / Configuration
 # -----------------------------
 # Option 1: Set GEMINI_API_KEY as environment variable
@@ -33,7 +44,7 @@ app = FastAPI(
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
 if not GEMINI_API_KEY:
-    raise ValueError("❌ Missing Gemini API key. Set GEMINI_API_KEY environment variable.")
+    raise ValueError(" Missing Gemini API key. Set GEMINI_API_KEY environment variable.")
 
 # Initialize OCRStage (Gemini model)
 ocr_stage = OCRStage(gemini_api_key= GEMINI_API_KEY, model_name="gemini-2.5-pro")
@@ -147,7 +158,7 @@ async def extract_and_classify(
     image: Optional[UploadFile] = File(None)
 ):
     try:
-        # 1️⃣ OCR stage
+        # 1️ OCR stage
         if text:
             ocr_res = ocr_stage.run(text, input_mode="text")
             text_content = text
@@ -159,24 +170,29 @@ async def extract_and_classify(
         else:
             raise HTTPException(status_code=400, detail="Provide either text or image input.")
 
-        print(f"🔍 OCR Result: {ocr_res}")
+        print(f" OCR Result: {ocr_res}")
 
-        # 2️⃣ Normalization
+        # 2️ Normalization
         norm_res = normalization_stage.run(ocr_res)
-        print(f"🔍 Normalization Result: {norm_res}")
+        print(f" Normalization Result: {norm_res}")
 
-        # 3️⃣ Classification
+        # 3️ Classification
         class_res = classification_stage.run(text_content, norm_res)
-        print(f"🔍 Classification Result: {class_res}")
+        print(f" Classification Result: {class_res}")
 
         return JSONResponse(content=class_res, status_code=200)
 
     except Exception as e:
-        print(f"❌ Error in extract_and_classify: {e}")
+        print(f" Error in extract_and_classify: {e}")
         return JSONResponse(content={"status": "error", "message": str(e)}, status_code=500)
 
 
-final_output_stage = FinalOutputStage()
+# Configure Gemini usage for final output snippet extraction
+USE_GEMINI_FOR_FINAL_SNIPPET = os.getenv("FINAL_SNIPPET_USE_GEMINI", "false").lower() == "true"
+final_output_stage = FinalOutputStage(
+    use_gemini=USE_GEMINI_FOR_FINAL_SNIPPET,
+    gemini_model=ocr_stage.model if USE_GEMINI_FOR_FINAL_SNIPPET else None
+)
 
 @app.post("/extract/final")
 async def extract_full_pipeline(
@@ -184,7 +200,7 @@ async def extract_full_pipeline(
     image: Optional[UploadFile] = File(None)
 ):
     try:
-        # 1️⃣ OCR
+        # 1️ OCR
         if text:
             ocr_res = ocr_stage.run(text, input_mode="text")
             text_content = text
@@ -196,82 +212,17 @@ async def extract_full_pipeline(
         else:
             raise HTTPException(status_code=400, detail="Provide either 'text' or 'image' input.")
 
-        # 2️⃣ Normalization
+        # 2️ Normalization
         norm_res = normalization_stage.run(ocr_res)
 
-        # 3️⃣ Classification
+        # 3️ Classification
         class_res = classification_stage.run(text_content, norm_res)
 
-        # 4️⃣ Final output assembly
+        # 4️ Final output assembly
         final_json = final_output_stage.run(ocr_res, norm_res, class_res, text_content)
         return JSONResponse(content=final_json, status_code=200)
 
     except Exception as e:
-        logger.error(f"❌ Final pipeline error: {e}")
+        logger.error(f"Final pipeline error: {e}")
         return JSONResponse(content={"status": "error", "message": str(e)}, status_code=500)
 
-# @app.post("/extract/ocr", response_model=OCRStage.OCRResponse)
-# async def extract_ocr(file: UploadFile = File(...)):
-#     """
-#     Accept an image upload (jpg/png/pdf pages as images) and return raw OCR tokens.
-#     """
-#     # Basic validation: content-type
-#     if not file.content_type.startswith("image/"):
-#         raise HTTPException(
-#             status_code=400, detail="Invalid file type. Please upload an image."
-#         )
-
-#     contents = await file.read()
-#     try:
-#         result = extract_raw_tokens_from_bytes(contents)
-#     except ValueError as ve:
-#         raise HTTPException(status_code=400, detail=str(ve))
-#     except Exception as e:
-#         raise HTTPException(status_code=500, detail=f"OCR failure: {str(e)}")
-
-#     return {"status": "ok", "data": result}
-
-
-# @app.post("/extract/normalize", response_model=Dict)
-# async def extract_normalize(file: UploadFile = File(...)):
-#     """
-#     Run OCR + normalization (Stages 1 & 2 together)
-#     """
-#     contents = await file.read()
-#     try:
-#         ocr_result = extract_raw_tokens_from_bytes(contents)
-#         norm_result = normalize_tokens(ocr_result["raw_tokens"])
-#     except Exception as e:
-#         raise HTTPException(status_code=500, detail=f"Normalization failure: {str(e)}")
-
-#     return {
-#         "status": "ok",
-#         "data": {
-#             "ocr_confidence": ocr_result["overall_confidence"],
-#             "currency_hint": ocr_result["currency_hint"],
-#             "normalized": norm_result,
-#         },
-#     }
-
-
-# # --- New endpoint: Full pipeline ---
-# @app.post("/extract/final", response_model=Dict)
-# async def extract_final(file: UploadFile = File(...)):
-#     """
-#     Run full pipeline: OCR + normalization + classification + final output.
-#     """
-#     contents = await file.read()
-#     try:
-#         ocr_result = extract_raw_tokens_from_bytes(contents)
-#         norm_result = normalize_tokens(ocr_result["raw_tokens"])
-#         # Extract normalized amounts and their contexts
-#         normalized_amounts = [a["cleaned"] for a in norm_result["normalized_amounts"]]
-#         contexts = [a["raw"] for a in norm_result["normalized_amounts"]]
-#         classified = classify_amounts(normalized_amounts, contexts)
-#         final_output = assemble_final_output(
-#             classified, currency=ocr_result.get("currency_hint", "INR")
-#         )
-#     except Exception as e:
-#         raise HTTPException(status_code=500, detail=f"Pipeline failure: {str(e)}")
-
-#     return {"status": "ok", "data": final_output}

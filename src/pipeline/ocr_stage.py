@@ -174,7 +174,7 @@ The output must start with '{{' and end with '}}' and be fully parseable by json
     try:
         response = model.generate_content(prompt)
         raw_output = response.text.strip()
-        logger.info("🤖 Full Gemini raw output:\n" + raw_output)
+        logger.info(" Full Gemini raw output:\n" + raw_output)
 
         # 🔧 Fix: Remove any Markdown code fences (```json, ``` etc.)
         raw_output = re.sub(r"```[\s\S]*?```", lambda m: m.group(0).strip('`').strip(), raw_output)
@@ -194,7 +194,7 @@ The output must start with '{{' and end with '}}' and be fully parseable by json
             logger.error(f"JSON parsing error: {e}\nRaw output:\n{raw_output}")
             return {"status": "no_amounts_found", "reason": "invalid_json_format"}
 
-        # ✅ Validate structure
+        #  Validate structure
         if isinstance(parsed, dict) and "raw_tokens" in parsed:
             return parsed
         elif isinstance(parsed, dict) and "status" in parsed:
